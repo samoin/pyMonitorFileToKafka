@@ -7,19 +7,27 @@ import logging
 #servername
 server_name         = "0"
 
+#queuetype, now support ["kestrel" , "kafka"]
+queue_type          = "kestrel"
+
 # delay
 #delay_second        = 3*60
-delay_second        = 30
+delay_second        = 10
 
 # path
-log_path            = "/var/log/rtb"
+log_path            = "/dsp/rsylog"
 
 #zookeeper
 zk_host             = "localhost:2181"
 
+#kestrel
+kestrel_enable      = True
+kestrel_server      = ["localhost:22133"]
+kestrel_queue       = "sdpp_basic_debug"
+
 # kafka
-kafka_host          = "10.10.9.21:9092"
-kafka_topic	    = "dsp_rtb_log"
+kafka_host          = "localhost:9092"
+kafka_topic	    = "dsp_rtb_log2"
 
 # 导入的条件字符串
 include_reg_str	    = ['"type":"click"' , '"type":"show"' , '"type":"push"']

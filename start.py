@@ -18,13 +18,14 @@ from kafka.producer import SimpleProducer
 from pyinotify import WatchManager, Notifier, ProcessEvent, IN_DELETE, IN_CREATE,IN_MODIFY
 import sched
 from threading import Timer
+import kestreler
 
+#初始化全局变量
+_loggerClient = logger.Logger()
 DIR = config.log_path					#需要同步的日志目录，在配置文件中指定
 LOG_SUFFIX = ".log"					#需要采集的日志的后缀名，即文件类型
 ZK_LOG_BASEPATH = "/dsp_add_node_" + config.server_name	#该采集点在zk中的目录地址，根据配置文件中唯一的server_name来确定唯一性
 LOG_STATUS_START = "0"	 				#zk节点中记录的值，此值为同步初始化的值，代表当前同步到第几行，默认为0行，在同步完一行后会修改此值
-#zk_row_key = "/dsp_add_row_" + config.server_name
-#LOG_PREFIX = "dsp_crit_"
 
 #初始化zk
 handler = zookeeper.init(config.zk_host)
@@ -32,10 +33,17 @@ handler = zookeeper.init(config.zk_host)
 wm = WatchManager()
 mask = IN_DELETE | IN_CREATE |IN_MODIFY   # watched events
 #增加kafka的生产者
-client = KafkaClient(config.kafka_host)
-producer = SimpleProducer(client)
+client = None
+producer = None
+if config.queue_type == "kafka":
+    client = KafkaClient(config.kafka_host)
+    producer = SimpleProducer(client)
+#增加kestrel的生产者
+kestrel_client = None
+if config.queue_type == "kestrel":
+    kestrel_client = kestreler.Kestrel()
 #定时任务缓冲池的对象
-SCHED_POOL = {}
+#SCHED_POOL = {}
 '''
 根据文件名返回对应的节点路径
 '''
@@ -48,23 +56,15 @@ def getNodePathByFilename(filename):
 '''
 def addSchedPool(filename):
     nodename = getNodePathByFilename(filename) 
-    print(SCHED_POOL)
-    if SCHED_POOL.get(nodename) is None or SCHED_POOL.get(nodename) == "":
-        SCHED_POOL[nodename] = "on"
+    lock_node = nodename + "_lock" 
+    #_loggerClient.info(getnode(lock_node , ""))
+    if getnode(lock_node , "")[0] == "":
+        setnode(lock_node, "on")
         curRow = getnode(nodename , LOG_STATUS_START)[0]
-	'''
-        # 第一个参数确定任务的时间，返回从某个特定的时间到现在经历的秒数 
-        # 第二个参数以某种人为的方式衡量时间 
-        schedule = sched.scheduler(time.time, time.sleep) 
-        # enter用来安排某事件的发生时间，从现在起第n秒开始启动 
-        schedule.enter(config.delay_second, 0, readReleaseFile, (DIR + "/" + filename , curRow , nodename)) 
-        print("加入定时任务，在" + str(config.delay_second) + "秒后执行对'" + filename + "'的执行")
-        # 持续运行，直到计划时间队列变成空为止 
-        schedule.run() 
-	'''
-        Timer(config.delay_second,  readReleaseFile, (DIR + "/" + filename , curRow , nodename)).start()
+        Timer(config.delay_second,  readReleaseFileForTimer, (DIR + "/" + filename , curRow , nodename)).start()
     else:
-        print("之前已加入定时任务，不操作")
+        #_loggerClient.info("之前已加入定时任务，不操作")
+        return
 
 '''
 对文件目录监控的类，从网上找的http://www.sharejs.com/codes/python/4307，用的是pyinotify模块
@@ -76,16 +76,15 @@ class PFilePath(ProcessEvent):
             nodename = getNodePathByFilename(filename)
             getnode(nodename, LOG_STATUS_START)
             addSchedPool(filename)
-        print   "Create file: %s " %   os.path.join(event.path, event.name)
+            #print   "Create file: %s " %   os.path.join(event.path, event.name)
  
     def process_IN_DELETE(self, event):
         filename = event.name
         if filename.endswith(LOG_SUFFIX):
             nodename = getNodePathByFilename(filename)
-            zookeeper.delete(handler,nodename)
-            del SCHED_POOL[nodename]
-            print(SCHED_POOL)
-        print   "Delete file: %s " %   os.path.join(event.path, event.name)
+            delnode(nodename)
+            delnode(nodename + "_lock")
+            #print   "Delete file: %s " %   os.path.join(event.path, event.name)
      
     def process_IN_MODIFY(self, event):
         filename = event.name
@@ -93,24 +92,47 @@ class PFilePath(ProcessEvent):
             nodename = getNodePathByFilename(filename)
             getnode(nodename, LOG_STATUS_START)
             addSchedPool(filename)
-        print   "Modify file: %s " %   os.path.join(event.path, event.name)
+            #print   "Modify file: %s " %   os.path.join(event.path, event.name)
+'''
+删除节点
+'''
+def delnode(nodepath):
+    #_loggerClient.info(">>>start delnode '" + nodepath + "' : " + str(time.time()))
+    try:
+        zookeeper.delete(handler, nodepath)
+    except:
+        _loggerClient.info('\n While delenode ,"' + nodepath + '" Some error/exception occurred.')
+    #_loggerClient.info(">>>end delnode '" + nodepath + "' : " + str(time.time()))
+'''
+修改节点
+'''
+def setnode(nodepath , nodeval=""):
+    getnode(nodepath, nodeval)
+    #_loggerClient.info(">>>start setnode '" + nodepath + "' : " + str(time.time()))
+    try:
+        zookeeper.set(handler, nodepath, nodeval)
+    except:
+        _loggerClient.info('\nWhile setnode ,"' + nodepath + '" Some error/exception occurred.')
+    #_loggerClient.info(">>>end setnode '" + nodepath + "' : " + str(time.time()))
 '''
 获取一个节点的值，如该节点不存在，则强制创建，并赋值空字符串
 '''
 def getnode(nodepath , nodeval=""):
+    #_loggerClient.info(">>>start getnode '" + nodepath + "' : " + str(time.time()))
     try:
         zookeeper.get_children(handler , nodepath , None)
     except zookeeper.NoNodeException:
         zookeeper.create(handler , nodepath , nodeval , [{"perms":0x1f,"scheme":"world","id":"anyone"}] , 0)
     except:
-        print '\nSome error/exception occurred.'
+        _loggerClient.info('\nWhile getnode ,"' + nodepath + '" Some error/exception occurred.')
+    #_loggerClient.info(">>>end getnode '" + nodepath + "' : " + str(time.time()))
     return zookeeper.get(handler , nodepath)
 
 '''
 函数主入口
 '''
 def main():
-    getnode(ZK_LOG_BASEPATH)
+    setnode(ZK_LOG_BASEPATH, "start")
     readFile(config.log_path)
     watch_files()
 
@@ -125,33 +147,65 @@ def readFile(log_path):
             nodename = getNodePathByFilename(filename)
             curRow = getnode(nodename , LOG_STATUS_START)[0]
             readReleaseFile(DIR + "/" + filename , curRow , nodename)
-
+    _loggerClient.info("初始化完成")
+    setnode(ZK_LOG_BASEPATH, "end")
+'''
+供定时器调用
+'''
+def readReleaseFileForTimer(filename , rownum , nodename):
+    if getnode(ZK_LOG_BASEPATH)[0] == "start":
+        filename = filename.replace(DIR + "/" , "")
+        nodename = getNodePathByFilename(filename)
+        delnode(nodename + "_lock")
+        _loggerClient.info("'" + filename + "'" + "未初始化完成，继续延迟执行")
+        addSchedPool(filename)
+    else:
+        readReleaseFile(filename , rownum , nodename)
+        delnode(nodename + "_lock")
 '''
 返回指定行数后的所有内容
 '''
 def readReleaseFile(filename , rownum , nodename):
-    file_tmp = open(filename , 'r')
-    row_array = file_tmp.readlines()
-    rownum = int(rownum)
-    if len(row_array) != rownum:
-        row_array = row_array[rownum:]
-    for row in row_array:
-        rownum += 1
-        zookeeper.set(handler, nodename, str(rownum))
-        if len(row.replace("\n","")) == 0:
-            continue
-        if len(config.include_reg_str) == 0:
-            writeToQueen(row)
-        else:
-            for key in config.include_reg_str : 
-                if key in row:
-                    writeToQueen(row)
+    try:
+        file_tmp = open(filename , 'r')
+        row_array = file_tmp.readlines()
+        rownum = int(rownum)
+        start_rownum = rownum
+        total_file_row = len(row_array)
+        if total_file_row != rownum:
+            row_array = row_array[rownum:]
+        _loggerClient.info(">>> start set file '" + filename + "' , now :" + str(time.time()))
+        zk_addcount = 0
+        for row in row_array:
+            rownum += 1
+            setnode(nodename, str(rownum))
+            if len(row.replace("\n","")) == 0:
+                continue
+            if len(config.include_reg_str) == 0:
+                writeToQueen(row)
+                zk_addcount += 1
+            else:
+                for key in config.include_reg_str : 
+                    if key in row:
+                        writeToQueen(row)
+                        zk_addcount += 1
+        _loggerClient.info(">>> end set file '" + filename + "' , now :" + str(time.time()) + " , total :" + str(total_file_row) + ",start :" + str(start_rownum) + ",end :" + str(rownum) + ",write:" + str(zk_addcount))
+    except IOError:
+        _loggerClient.info("'" + filename + "'" + "已被删除，不再执行该文件解析")
+    except:
+        _loggerClient.info('\nWhile readReleaseFile ,"' + filename + '","' + str(rownum) + '","' + nodename + '" Some error/exception occurred.')
+
     
 '''
 写入队列中，目前为写入kafka
 '''    
 def writeToQueen(val):
-    producer.send_messages(config.kafka_topic, val)
+    #_loggerClient.info(">>>start write kafka : " + str(time.time()))
+    if config.queue_type == "kafka":
+        producer.send_messages(config.kafka_topic, val)
+    if config.queue_type == "kestrel":
+        kestrel_client.addline(config.kestrel_queue, val)
+    #_loggerClient.info(">>>end write kafka : " + str(time.time()))
 
 
 '''
@@ -178,11 +232,11 @@ def getFileRows(filename):
             buffer = thefile.read(1024 * 8192)  
             if not buffer:  
                 break  
-        print(buffer)
+        _loggerClient.info(buffer)
         count += buffer.count('\n')  
         thefile.close()
     except :
-        print '\nSome error/exception occurred when read file \'' + filename + '\'.'
+        _loggerClient.info('\nWhile readReleaseFile ,Some error/exception occurred when read file \'' + filename + '\'.')
     return count
 '''
 监控文件目录
