@@ -19,6 +19,9 @@ from pyinotify import WatchManager, Notifier, ProcessEvent, IN_DELETE, IN_CREATE
 import sched
 from threading import Timer
 import kestreler
+import traceback
+import datetime
+
 
 #初始化全局变量
 _loggerClient = logger.Logger()
@@ -101,7 +104,8 @@ def delnode(nodepath):
     try:
         zookeeper.delete(handler, nodepath)
     except:
-        _loggerClient.info('\n While delenode ,"' + nodepath + '" Some error/exception occurred.')
+        traceback.print_exc()
+        myprint('\n While delenode ,"' + nodepath + '" Some error/exception occurred.')
     #_loggerClient.info(">>>end delnode '" + nodepath + "' : " + str(time.time()))
 '''
 修改节点
@@ -112,7 +116,8 @@ def setnode(nodepath , nodeval=""):
     try:
         zookeeper.set(handler, nodepath, nodeval)
     except:
-        _loggerClient.info('\nWhile setnode ,"' + nodepath + '" Some error/exception occurred.')
+        traceback.print_exc()
+        myprint('\nWhile setnode ,"' + nodepath + '" Some error/exception occurred.')
     #_loggerClient.info(">>>end setnode '" + nodepath + "' : " + str(time.time()))
 '''
 获取一个节点的值，如该节点不存在，则强制创建，并赋值空字符串
@@ -124,7 +129,8 @@ def getnode(nodepath , nodeval=""):
     except zookeeper.NoNodeException:
         zookeeper.create(handler , nodepath , nodeval , [{"perms":0x1f,"scheme":"world","id":"anyone"}] , 0)
     except:
-        _loggerClient.info('\nWhile getnode ,"' + nodepath + '" Some error/exception occurred.')
+        traceback.print_exc()
+        myprint('\nWhile getnode ,"' + nodepath + '" Some error/exception occurred.')
     #_loggerClient.info(">>>end getnode '" + nodepath + "' : " + str(time.time()))
     return zookeeper.get(handler , nodepath)
 
@@ -168,12 +174,25 @@ def readReleaseFileForTimer(filename , rownum , nodename):
 def readReleaseFile(filename , rownum , nodename):
     try:
         file_tmp = open(filename , 'r')
+        allinfo = file_tmp.read()
+        checkFlag = False
+        for key in config.include_reg_str : 
+            if key in allinfo:
+                checkFlag = True
+                break
+        if not checkFlag:
+            _loggerClient.info(">>> file '" + filename + " not contains regstr , exit' , now :" + str(time.time()))
+            return 
+        file_tmp.close()
+        file_tmp = open(filename , 'r')
         row_array = file_tmp.readlines()
         rownum = int(rownum)
         start_rownum = rownum
         total_file_row = len(row_array)
-        if total_file_row != rownum:
-            row_array = row_array[rownum:]
+        if total_file_row != start_rownum:
+            row_array = row_array[start_rownum : total_file_row]
+        else:
+            row_array = []
         _loggerClient.info(">>> start set file '" + filename + "' , now :" + str(time.time()))
         zk_addcount = 0
         for row in row_array:
@@ -190,10 +209,12 @@ def readReleaseFile(filename , rownum , nodename):
                         writeToQueen(row)
                         zk_addcount += 1
         _loggerClient.info(">>> end set file '" + filename + "' , now :" + str(time.time()) + " , total :" + str(total_file_row) + ",start :" + str(start_rownum) + ",end :" + str(rownum) + ",write:" + str(zk_addcount))
+        file_tmp.close()
     except IOError:
         _loggerClient.info("'" + filename + "'" + "已被删除，不再执行该文件解析")
     except:
-        _loggerClient.info('\nWhile readReleaseFile ,"' + filename + '","' + str(rownum) + '","' + nodename + '" Some error/exception occurred.')
+        traceback.print_exc()
+        myprint('\nWhile readReleaseFile ,"' + filename + '","' + str(rownum) + '","' + nodename + '" Some error/exception occurred.')
 
     
 '''
@@ -236,7 +257,8 @@ def getFileRows(filename):
         count += buffer.count('\n')  
         thefile.close()
     except :
-        _loggerClient.info('\nWhile readReleaseFile ,Some error/exception occurred when read file \'' + filename + '\'.')
+        traceback.print_exc()
+        myprint('\nWhile readReleaseFile ,Some error/exception occurred when read file \'' + filename + '\'.')
     return count
 '''
 监控文件目录
@@ -279,6 +301,13 @@ def compareAsc(x, y):
     else:
         return 0
 
+'''
+自定义的打印
+'''
+def myprint(info):
+    print('[' + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '] ' + info)
+
 #主函数调用
 if __name__ == '__main__':
+    myprint("start mission")
     main()
