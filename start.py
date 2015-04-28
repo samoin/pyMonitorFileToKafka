@@ -22,6 +22,7 @@ import kestreler
 import traceback
 import datetime
 
+zookeeper.set_debug_level(zookeeper.LOG_LEVEL_ERROR) #设置zookeeper的日志等级
 
 #初始化全局变量
 _loggerClient = logger.Logger()
@@ -47,6 +48,41 @@ if config.queue_type == "kestrel":
     kestrel_client = kestreler.Kestrel()
 #定时任务缓冲池的对象
 #SCHED_POOL = {}
+
+'''
+简单的基于数组做了封装类
+'''
+class Queue():
+    _queue = []
+    _condition = threading.Condition()
+    def __init__(self):
+        print("Queue")
+    def append_queue(self , filename):
+        self._condition.acquire()
+        self._queue.append(filename)
+        self._condition.notify()
+        self._condition.release()
+    def get_queue(self):
+        self._condition.acquire()
+        val = None
+        if len(self._queue) > 0:
+            val = self._queue[0]
+            del self._queue[0]
+        self._condition.notify()
+        self._condition.release()
+        return val
+'''
+继承基础队列类，根据dsp的业务逻辑增加方法处理队列
+'''        
+class DspQueue(Queue, threading.Thread):        
+    def __init__(self):
+        print("UseQueue")
+        threading.Thread.__init__(self)
+    def run(self):
+        while True :
+            filename = self.get_queue()
+            
+
 '''
 根据文件名返回对应的节点路径
 '''
@@ -105,7 +141,7 @@ def delnode(nodepath):
         zookeeper.delete(handler, nodepath)
     except:
         traceback.print_exc()
-        myprint('\n While delenode ,"' + nodepath + '" Some error/exception occurred.')
+        myprint(' While delenode ,"' + nodepath + '" Some error/exception occurred.')
     #_loggerClient.info(">>>end delnode '" + nodepath + "' : " + str(time.time()))
 '''
 修改节点
@@ -117,7 +153,7 @@ def setnode(nodepath , nodeval=""):
         zookeeper.set(handler, nodepath, nodeval)
     except:
         traceback.print_exc()
-        myprint('\nWhile setnode ,"' + nodepath + '" Some error/exception occurred.')
+        myprint('While setnode ,"' + nodepath + '" Some error/exception occurred.')
     #_loggerClient.info(">>>end setnode '" + nodepath + "' : " + str(time.time()))
 '''
 获取一个节点的值，如该节点不存在，则强制创建，并赋值空字符串
@@ -128,9 +164,15 @@ def getnode(nodepath , nodeval=""):
         zookeeper.get_children(handler , nodepath , None)
     except zookeeper.NoNodeException:
         zookeeper.create(handler , nodepath , nodeval , [{"perms":0x1f,"scheme":"world","id":"anyone"}] , 0)
+    except zookeeper.InvalidStateException:
+        #try to init zookeeper again, the exception occurred means the sessionId is expired
+        #handler = zookeeper.init(config.zk_host)
+        _loggerClient.error("the zookeeper sessionId is expired , please restart this mission again.")
+    except zookeeper.OperationTimeoutException:
+        _loggerClient.error("OperationTimeout, please restart this mission again.")
     except:
         traceback.print_exc()
-        myprint('\nWhile getnode ,"' + nodepath + '" Some error/exception occurred.')
+        myprint('While getnode ,"' + nodepath + '" Some error/exception occurred.')
     #_loggerClient.info(">>>end getnode '" + nodepath + "' : " + str(time.time()))
     return zookeeper.get(handler , nodepath)
 
@@ -139,7 +181,11 @@ def getnode(nodepath , nodeval=""):
 '''
 def main():
     setnode(ZK_LOG_BASEPATH, "start")
-    readFile(config.log_path)
+    if config.init_all:
+        readFile(config.log_path)
+    else:
+        _loggerClient.warn("本次启动不进行初始化比对")
+        setnode(ZK_LOG_BASEPATH, "end")
     watch_files()
 
 '''
@@ -153,7 +199,7 @@ def readFile(log_path):
             nodename = getNodePathByFilename(filename)
             curRow = getnode(nodename , LOG_STATUS_START)[0]
             readReleaseFile(DIR + "/" + filename , curRow , nodename)
-    _loggerClient.info("初始化完成")
+    _loggerClient.warn("初始化完成")
     setnode(ZK_LOG_BASEPATH, "end")
 '''
 供定时器调用
@@ -173,22 +219,28 @@ def readReleaseFileForTimer(filename , rownum , nodename):
 '''
 def readReleaseFile(filename , rownum , nodename):
     try:
+        _loggerClient.info(filename)
+        #check the file contains regex first
         file_tmp = open(filename , 'r')
         allinfo = file_tmp.read()
+        row_array = allinfo.split('\n')
+        rownum = int(rownum)
+        start_rownum = rownum
+        #split will give one more array items, that is empty
+        total_file_row = len(row_array) - 1
         checkFlag = False
         for key in config.include_reg_str : 
             if key in allinfo:
                 checkFlag = True
                 break
+        _loggerClient.info(filename)
         if not checkFlag:
+            file_tmp.close()
+            setnode(nodename, str(total_file_row))
             _loggerClient.info(">>> file '" + filename + " not contains regstr , exit' , now :" + str(time.time()))
             return 
-        file_tmp.close()
-        file_tmp = open(filename , 'r')
-        row_array = file_tmp.readlines()
-        rownum = int(rownum)
-        start_rownum = rownum
-        total_file_row = len(row_array)
+        _loggerClient.info(filename)
+        #open file again,to get all file contents
         if total_file_row != start_rownum:
             row_array = row_array[start_rownum : total_file_row]
         else:
@@ -214,19 +266,19 @@ def readReleaseFile(filename , rownum , nodename):
         _loggerClient.info("'" + filename + "'" + "已被删除，不再执行该文件解析")
     except:
         traceback.print_exc()
-        myprint('\nWhile readReleaseFile ,"' + filename + '","' + str(rownum) + '","' + nodename + '" Some error/exception occurred.')
+        myprint('While readReleaseFile ,"' + filename + '","' + str(rownum) + '","' + nodename + '" Some error/exception occurred.')
 
     
 '''
-写入队列中，目前为写入kafka
+写入队列中，目前支持写入kafka和kestrel
 '''    
 def writeToQueen(val):
-    #_loggerClient.info(">>>start write kafka : " + str(time.time()))
+    #_loggerClient.info(">>>start write queen : " + str(time.time()))
     if config.queue_type == "kafka":
         producer.send_messages(config.kafka_topic, val)
     if config.queue_type == "kestrel":
         kestrel_client.addline(config.kestrel_queue, val)
-    #_loggerClient.info(">>>end write kafka : " + str(time.time()))
+    #_loggerClient.info(">>>end write queen : " + str(time.time()))
 
 
 '''
@@ -258,7 +310,7 @@ def getFileRows(filename):
         thefile.close()
     except :
         traceback.print_exc()
-        myprint('\nWhile readReleaseFile ,Some error/exception occurred when read file \'' + filename + '\'.')
+        myprint('While readReleaseFile ,Some error/exception occurred when read file \'' + filename + '\'.')
     return count
 '''
 监控文件目录
@@ -305,9 +357,10 @@ def compareAsc(x, y):
 自定义的打印
 '''
 def myprint(info):
-    print('[' + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '] ' + info)
+    #print('[' + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '] ' + info)
+    _loggerClient.error(str(info))
 
 #主函数调用
 if __name__ == '__main__':
-    myprint("start mission")
+    _loggerClient.warn("start mission")
     main()
